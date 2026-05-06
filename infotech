@@ -1,0 +1,98 @@
+import time
+import pandas as pd
+import re
+from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+
+URL = "https://www.bing.com/jobs?q=hdfc%20bank%20careers"
+OUT_CSV = "bing_hdfc_jobs_full.csv"
+
+def clean(text):
+    return re.sub(r"\s+", " ", text or "").strip()
+
+# ------------------ SETUP ------------------
+
+opts = Options()
+opts.add_argument("--start-maximized")
+
+driver = webdriver.Chrome(options=opts)
+driver.get(URL)
+
+time.sleep(5)
+
+jobs = []
+seen = set()
+
+# ------------------ GET LEFT JOB LIST ------------------
+
+job_list = driver.find_elements(By.CSS_SELECTOR, "li")
+
+print(f"🔍 Found {len(job_list)} possible items")
+
+# ------------------ LOOP + CLICK ------------------
+
+for i, job in enumerate(job_list[:15]):  # limit to first 15
+    try:
+        driver.execute_script("arguments[0].scrollIntoView();", job)
+        time.sleep(1)
+
+        job.click()
+        time.sleep(3)  # wait for panel to load
+
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+
+        panel = soup.select_one(".jb_l2_jobdetails_container")
+        if not panel:
+            continue
+
+        # -------- TITLE --------
+        title = clean(panel.select_one(".jb_title").get_text()) if panel.select_one(".jb_title") else ""
+
+        # -------- COMPANY --------
+        company = clean(panel.select_one(".jbpnl_coLoc_co").get_text()) if panel.select_one(".jbpnl_coLoc_co") else ""
+
+        # -------- LOCATION --------
+        location = clean(panel.select_one(".jbpnl_coLoc_loc").get_text()) if panel.select_one(".jbpnl_coLoc_loc") else ""
+
+        # -------- DATE --------
+        date = clean(panel.select_one(".jbpnl_postDate").get_text()) if panel.select_one(".jbpnl_postDate") else ""
+
+        # -------- JOB TYPE --------
+        job_type = clean(panel.select_one(".jbpnl_meta_data").get_text()) if panel.select_one(".jbpnl_meta_data") else ""
+
+        # -------- DESCRIPTION --------
+        desc = clean(panel.select_one(".jbpnl_desc").get_text()) if panel.select_one(".jbpnl_desc") else ""
+
+        # -------- APPLY LINK --------
+        link_tag = panel.select_one(".cbtn")
+        link = link_tag.get("href") if link_tag else ""
+
+        key = (title, company)
+        if key not in seen and title:
+            seen.add(key)
+
+            jobs.append({
+                "Job_name": title,
+                "Company_name": company,
+                "Location": location,
+                "Posting_date": date,
+                "Type": job_type,
+                "Job_description": desc,
+                "Job_application_link": link
+            })
+
+            print(f"✅ {title}")
+
+    except Exception as e:
+        print("⚠️ Skipped:", e)
+        continue
+
+driver.quit()
+
+df = pd.DataFrame(jobs)
+df.to_csv(OUT_CSV, index=False)
+
+print(f"\n🎉 Saved {len(df)} jobs to {OUT_CSV}")
+print(df.head())
