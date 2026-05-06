@@ -1,0 +1,182 @@
+import re
+import csv
+import time
+import json
+import pandas as pd
+from bs4 import BeautifulSoup
+from dateutil import parser
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+
+START_URL = "https://jobs.gohire.io/piersight-rfd9c90d/"
+OUT_CSV = "piersight_jobs_clean.csv"
+
+# ------------------ HELPERS ------------------
+
+def clean(text):
+    return re.sub(r"\s+", " ", text or "").strip()
+
+def normalize_date(s):
+    if not s:
+        return ""
+    try:
+        return parser.parse(s, fuzzy=True).strftime("%d-%m-%Y")
+    except:
+        return ""
+
+# ------------------ MAIN EXTRACTION ------------------
+
+def extract_job(html, url):
+    soup = BeautifulSoup(html, "html.parser")
+    text = clean(soup.get_text(" "))
+
+    # -------- TITLE --------
+    title_tag = soup.find("h1")
+    title = clean(title_tag.text) if title_tag else ""
+
+    # -------- LOCATION (CLEAN) --------
+    location = ""
+    location_match = re.search(r"Location\s*[:\-]?\s*([A-Za-z,\s]+)", text)
+
+    if location_match:
+        location_raw = location_match.group(1)
+
+        # remove noise after actual location
+        location = re.split(
+            r"Salary|Job Type|Full[- ]time|Part[- ]time|Intern|Contract|Date",
+            location_raw,
+            flags=re.I
+        )[0]
+
+        location = clean(location)
+
+        # fix edge case like ", India"
+        if location.startswith(","):
+            location = location[1:].strip()
+
+    # -------- JOB TYPE --------
+    type_match = re.search(
+        r"(Full[- ]time|Part[- ]time|Internship|Contract)",
+        text,
+        re.I
+    )
+    job_type = type_match.group(1) if type_match else ""
+
+    # -------- EXPERIENCE --------
+    exp_match = re.search(
+        r"(\d+\s*[-–]\s*\d+\s*years?|\d+\+?\s*years?)",
+        text,
+        re.I
+    )
+    experience = exp_match.group(1) if exp_match else ""
+
+    # -------- DATE (REAL FIX) --------
+    posted_date = ""
+
+    # 1. JSON-LD (BEST)
+    script = soup.find("script", type="application/ld+json")
+    if script:
+        try:
+            data = json.loads(script.string)
+
+            if isinstance(data, dict):
+                date_raw = data.get("datePosted") or data.get("datePublished")
+                if date_raw:
+                    posted_date = normalize_date(date_raw)
+
+        except:
+            pass
+
+    # 2. META TAG
+    if not posted_date:
+        meta = soup.find("meta", {"property": "article:published_time"})
+        if meta:
+            posted_date = normalize_date(meta.get("content"))
+
+    # 3. FALLBACK REGEX
+    if not posted_date:
+        fallback = re.search(
+            r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(st|nd|rd|th)?,?\s+\d{4}",
+            text,
+            re.I
+        )
+        if fallback:
+            posted_date = normalize_date(fallback.group(0))
+
+    # -------- DESCRIPTION --------
+    desc = ""
+    desc_start = re.search(
+        r"(Job Description|Responsibilities|Role Overview)",
+        text,
+        re.I
+    )
+    if desc_start:
+        desc = clean(text[desc_start.start():])[:800]
+
+    return {
+        "Job_name": title,
+        "Job_description": desc,
+        "Posting_date(dd-mm-yyyy)": posted_date,
+        "Experience": experience,
+        "Location": location,
+        "Company_name": "PierSight",
+        "Job_application_link": url,
+        "Type": job_type
+    }
+
+# ------------------ SELENIUM SETUP ------------------
+
+opts = Options()
+opts.add_argument("--start-maximized")
+
+driver = webdriver.Chrome(options=opts)
+driver.get(START_URL)
+
+rows = []
+seen = set()
+
+print("👉 Click a job manually, then press Enter here. Type 'q' to quit.\n")
+
+try:
+    while True:
+        cmd = input("Press Enter after opening a job (q to quit): ").strip().lower()
+        if cmd == "q":
+            break
+
+        time.sleep(2)
+
+        html = driver.page_source
+        url = driver.current_url
+
+        data = extract_job(html, url)
+
+        key = (data["Job_name"], data["Job_application_link"])
+        if key not in seen:
+            rows.append(data)
+            seen.add(key)
+
+            pd.DataFrame(rows).to_csv(
+                OUT_CSV,
+                index=False,
+                quoting=csv.QUOTE_ALL
+            )
+
+            print(f"\n✅ Saved {len(rows)} jobs")
+            print("📌", data["Job_name"])
+            print("📍", data["Location"])
+            print("🗓️", data["Posting_date(dd-mm-yyyy)"])
+            print("💼", data["Experience"])
+            print("🏢", data["Type"])
+            print("—" * 40)
+
+        driver.back()
+        time.sleep(3)
+
+finally:
+    pd.DataFrame(rows).to_csv(
+        OUT_CSV,
+        index=False,
+        quoting=csv.QUOTE_ALL
+    )
+    driver.quit()
+    print(f"\n🎉 Final CSV saved -> {OUT_CSV}")
