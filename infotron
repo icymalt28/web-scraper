@@ -1,0 +1,128 @@
+import time
+import pandas as pd
+import re
+from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+
+URL = "https://www.infotronsolutions.com/careers"
+OUT_CSV = "infotron_jobs_clean.csv"
+COMPANY = "Infotron Solutions"
+
+# ------------------ HELPERS ------------------
+
+def clean(text):
+    return re.sub(r"\s+", " ", text or "").strip()
+
+# ------------------ SETUP ------------------
+
+opts = Options()
+opts.add_argument("--start-maximized")
+
+driver = webdriver.Chrome(options=opts)
+wait = WebDriverWait(driver, 25)
+
+driver.get(URL)
+
+# ------------------ SWITCH TO IFRAME ------------------
+
+print("⏳ Waiting for iframe...")
+wait.until(EC.presence_of_element_located((By.TAG_NAME, "iframe")))
+
+iframe = driver.find_element(By.TAG_NAME, "iframe")
+driver.switch_to.frame(iframe)
+
+print("✅ Switched to iframe")
+
+# ------------------ WAIT FOR JOBS ------------------
+
+print("⏳ Waiting for job cards...")
+wait.until(
+    EC.presence_of_all_elements_located((By.CLASS_NAME, "currentOpenList"))
+)
+
+time.sleep(2)  # buffer
+
+# ------------------ PARSE ------------------
+
+soup = BeautifulSoup(driver.page_source, "html.parser")
+
+cards = soup.find_all("div", class_="currentOpenList")
+
+print(f"🔍 Total raw cards found: {len(cards)}")
+
+jobs = []
+seen_ids = set()
+
+for i, card in enumerate(cards):
+    try:
+        print(f"\n--- Processing card {i+1} ---")
+
+        # -------- JOB ID --------
+        job_id = card.get("data-job-id", "").strip()
+        print("Job ID:", job_id)
+
+        if not job_id:
+            print("❌ No job_id → skipped")
+            continue
+
+        if job_id in seen_ids:
+            print("❌ Duplicate → skipped")
+            continue
+
+        seen_ids.add(job_id)
+
+        # -------- TITLE (ROBUST) --------
+        title_container = card.select_one(".curJobTitle")
+        title = clean(title_container.get_text(" ")) if title_container else ""
+
+        print("Title:", title)
+
+        if not title:
+            print("❌ No title → skipped")
+            continue
+
+        # -------- LOCATION --------
+        loc_tag = card.select_one(".curlocation")
+        location = clean(loc_tag.get_text(" ")) if loc_tag else ""
+
+        # -------- DATE --------
+        date_tag = card.select_one(".nubOfdays")
+        posted_date = clean(date_tag.get_text(" ")) if date_tag else ""
+
+        # -------- DESCRIPTION --------
+        desc_tag = card.select_one(".curJobInfo")
+        desc = clean(desc_tag.get_text(" ")) if desc_tag else ""
+
+        jobs.append({
+            "Job_id": job_id,
+            "Job_name": title,
+            "Job_description": desc,
+            "Posting_date": posted_date,
+            "Experience": "",
+            "Location": location,
+            "Company_name": COMPANY,
+            "Job_application_link": "",
+            "Type": ""
+        })
+
+        print("✅ Added")
+
+    except Exception as e:
+        print("⚠️ Error:", e)
+        continue
+
+driver.quit()
+
+# ------------------ SAVE ------------------
+
+df = pd.DataFrame(jobs)
+
+df.to_csv(OUT_CSV, index=False)
+
+print("\n============================")
+print(f"✅ Saved {len(df)} jobs to {OUT_CSV}")
+print(df.head())
